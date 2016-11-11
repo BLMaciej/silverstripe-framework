@@ -10,6 +10,11 @@
 class GridFieldExportButton implements GridField_HTMLProvider, GridField_ActionProvider, GridField_URLHandler {
 
 	/**
+	 * @var integer
+	 */
+	protected static $batchSize = 1000;
+
+	/**
 	 * @var array Map of a property name on the exported objects, with values being the column title in the CSV file.
 	 * Note that titles are only used when {@link $csvHasHeader} is set to TRUE.
 	 */
@@ -123,6 +128,11 @@ class GridFieldExportButton implements GridField_HTMLProvider, GridField_ActionP
 		$gridField->getConfig()->removeComponentsByType('GridFieldPaginator');
 		
 		$items = $gridField->getManipulatedList();
+		
+		// Get the ModelAdmin list that is affected by the search context
+		if($controller = Controller::curr())
+			if($controller instanceof ModelAdmin)
+				$items = $controller->getList();
 
 		// @todo should GridFieldComponents change behaviour based on whether others are available in the config?
 		foreach($gridField->getConfig()->getComponents() as $component){
@@ -131,38 +141,45 @@ class GridFieldExportButton implements GridField_HTMLProvider, GridField_ActionP
 			}
 		}
 
-		foreach($items->limit(null) as $item) {
-			if(!$item->hasMethod('canView') || $item->canView()) {
-				$columnData = array();
-
-				foreach($csvColumns as $columnSource => $columnHeader) {
-					if(!is_string($columnHeader) && is_callable($columnHeader)) {
-						if($item->hasMethod($columnSource)) {
-							$relObj = $item->{$columnSource}();
+		// Process items in batches to avoid potential memory allocation issues when working with large DataList
+		$offset = 0;
+		$batch = $items->limit(self::$batchSize, $offset);
+		while($batch->first()) {
+			foreach($batch as $item) {
+				if(!$item->hasMethod('canView') || $item->canView()) {
+					$columnData = array();
+	
+					foreach($csvColumns as $columnSource => $columnHeader) {
+						if(!is_string($columnHeader) && is_callable($columnHeader)) {
+							if($item->hasMethod($columnSource)) {
+								$relObj = $item->{$columnSource}();
+							} else {
+								$relObj = $item->relObject($columnSource);
+							}
+	
+							$value = $columnHeader($relObj);
 						} else {
-							$relObj = $item->relObject($columnSource);
+							$value = $gridField->getDataFieldValue($item, $columnSource);
+	
+							if(!$value) {
+								$value = $gridField->getDataFieldValue($item, $columnHeader);
+							}
 						}
-
-						$value = $columnHeader($relObj);
-					} else {
-						$value = $gridField->getDataFieldValue($item, $columnSource);
-
-						if(!$value) {
-							$value = $gridField->getDataFieldValue($item, $columnHeader);
-						}
+	
+						$value = str_replace(array("\r", "\n"), "\n", $value);
+						$columnData[] = '"' . str_replace('"', '""', $value) . '"';
 					}
-
-					$value = str_replace(array("\r", "\n"), "\n", $value);
-					$columnData[] = '"' . str_replace('"', '""', $value) . '"';
+	
+					$fileData .= implode($separator, $columnData);
+					$fileData .= "\n";
 				}
-
-				$fileData .= implode($separator, $columnData);
-				$fileData .= "\n";
+	
+				if($item->hasMethod('destroy')) {
+					$item->destroy();
+				}
 			}
-
-			if($item->hasMethod('destroy')) {
-				$item->destroy();
-			}
+			$offset += self::$batchSize;
+			$batch = $items->limit(self::$batchSize, $offset);
 		}
 
 		return $fileData;
